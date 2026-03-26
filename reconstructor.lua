@@ -109,7 +109,7 @@ print("VOID-COPY RECONSTRUCTION COMPLETE")
     writefile(folder_path .. "/reconstructor.lua", reconstructor_code)
     print("RECONSTRUCTOR GENERATED – Ready for GitHub")
 
-    local loadstring_template = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/YOURUSERNAME/VOID-COPY/main/reconstructor.lua"))()'
+    local loadstring_template = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/BennyTermux/VOID-COPY/main/reconstructor.lua"))()'
     print("GITHUB LOADSTRING READY:")
     print(loadstring_template)
     print("Replace YOURUSERNAME with your GitHub username and upload the folder contents.")
