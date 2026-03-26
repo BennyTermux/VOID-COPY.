@@ -1,119 +1,246 @@
--- VOID-COPY v1.0 | Built from scratch for Bennny | Zero dependencies
-local VOID = {}
-local genv = getgenv() or {}
-genv.VOID_COPY = genv.VOID_COPY or {}
+-- VOID-COPY v1.1 | Built from scratch for Bennny | Zero dependencies
+local HttpService = game:GetService("HttpService")
+local CollectionService = game:GetService("CollectionService")
 
-local function secure_env()
-    local mt = getmetatable(genv) or {}
-    mt.__index = function() return nil end
-    setmetatable(genv, mt)
-end
-secure_env()
+local VOID = {}
+local genv = (getgenv and getgenv()) or _G
+
+genv.VOID_COPY = genv.VOID_COPY or {}
 
 local CONFIG = {
     output_folder = "VOID-COPY",
-    exclude_services = {"CoreGui", "CorePackages", "RobloxGui"},
     max_depth = 250,
-    chunk_size = 512,
-    debug = false
+    debug = false,
 }
 
+local function debug_log(...)
+    if CONFIG.debug then
+        print("[VOID-COPY]", ...)
+    end
+end
+
 local function guid()
-    return string.format("%08x-%04x-%04x-%04x-%012x", math.random(0,0xfffffff), math.random(0,0xffff), math.random(0,0xffff), math.random(0,0xffff), math.random(0,0xfffffffffff))
+    if HttpService.GenerateGUID then
+        return HttpService:GenerateGUID(false)
+    end
+
+    return string.format(
+        "%08x-%04x-%04x-%04x-%012x",
+        math.random(0, 0xFFFFFFFF),
+        math.random(0, 0xFFFF),
+        math.random(0, 0xFFFF),
+        math.random(0, 0xFFFF),
+        math.random(0, 0xFFFFFFFFFFF)
+    )
+end
+
+local function safe_read_property(inst, prop)
+    local ok, value = pcall(function()
+        return inst[prop]
+    end)
+
+    if not ok then
+        return nil
+    end
+
+    local value_type = typeof(value)
+    if value_type == "Instance" or value_type == "RBXScriptSignal" or value_type == "function" then
+        return nil
+    end
+
+    return value
 end
 
 local function get_all_properties(inst)
     local props = {}
-    local success, result = pcall(function()
+
+    -- Instance:GetProperties is executor-dependent and often unavailable.
+    local ok, property_names = pcall(function()
         return inst:GetProperties()
     end)
-    if success then
-        for _, prop in ipairs(result) do
-            local ok, val = pcall(function() return inst[prop] end)
-            if ok then props[prop] = val end
+
+    if not ok or type(property_names) ~= "table" then
+        return props
+    end
+
+    for _, prop in ipairs(property_names) do
+        local value = safe_read_property(inst, prop)
+        if value ~= nil then
+            props[prop] = value
         end
     end
+
     return props
 end
 
-local function serialize_instance(inst, visited, id_map)
-    if visited[inst] then return nil end
-    visited[inst] = true
+local function get_tags(inst)
+    local ok, tags = pcall(function()
+        return CollectionService:GetTags(inst)
+    end)
 
-    local id = guid()
-    id_map[inst] = id
+    return (ok and tags) or {}
+end
+
+local function serialize_instance(inst, visited, node_count, depth)
+    if visited[inst] then
+        return nil
+    end
+
+    if depth > CONFIG.max_depth then
+        debug_log("Depth cap reached at", inst:GetFullName())
+        return nil
+    end
+
+    visited[inst] = true
+    node_count.value += 1
 
     local data = {
-        id = id,
+        id = guid(),
         class = inst.ClassName,
         name = inst.Name,
         properties = get_all_properties(inst),
         attributes = inst:GetAttributes(),
-        tags = inst:GetTags and inst:GetTags() or {},
-        children = {}
+        tags = get_tags(inst),
+        children = {},
     }
 
     if inst:IsA("LuaSourceContainer") then
-        data.source = inst.Source
+        local source_ok, source = pcall(function()
+            return inst.Source
+        end)
+
+        if source_ok then
+            data.source = source
+        end
     end
 
     for _, child in ipairs(inst:GetChildren()) do
-        local child_data = serialize_instance(child, visited, id_map)
-        if child_data then table.insert(data.children, child_data) end
+        local child_data = serialize_instance(child, visited, node_count, depth + 1)
+        if child_data then
+            table.insert(data.children, child_data)
+        end
     end
 
     return data
 end
 
+local function sanitize_name(name)
+    return tostring(name):gsub("%W", "_")
+end
+
+local function ensure_folder(path)
+    if isfolder and isfolder(path) then
+        return
+    end
+
+    if makefolder then
+        makefolder(path)
+    end
+end
+
+local function build_reconstructor_template(hierarchy_url)
+    return string.format([[
+-- VOID-COPY RECONSTRUCTOR v1.1 | Load via loadstring
+local HttpService = game:GetService("HttpService")
+local CollectionService = game:GetService("CollectionService")
+
+local data = HttpService:JSONDecode(game:HttpGet(%q))
+
+local function rebuild(node, parent)
+    local ok, inst = pcall(function()
+        return Instance.new(node.class)
+    end)
+
+    if not ok or not inst then
+        warn("[VOID-COPY] Failed to create instance of class:", node.class)
+        return
+    end
+
+    inst.Name = node.name
+
+    for k, v in pairs(node.properties or {}) do
+        pcall(function()
+            inst[k] = v
+        end)
+    end
+
+    for k, v in pairs(node.attributes or {}) do
+        pcall(function()
+            inst:SetAttribute(k, v)
+        end)
+    end
+
+    for _, tag in ipairs(node.tags or {}) do
+        pcall(function()
+            CollectionService:AddTag(inst, tag)
+        end)
+    end
+
+    if node.source then
+        pcall(function()
+            inst.Source = node.source
+        end)
+    end
+
+    inst.Parent = parent
+
+    for _, child in ipairs(node.children or {}) do
+        rebuild(child, inst)
+    end
+end
+
+rebuild(data.hierarchy, game)
+print("VOID-COPY RECONSTRUCTION COMPLETE")
+]], hierarchy_url)
+end
+
 local function main()
-    print("VOID-COPY INITIALIZED – TARGET ACQUIRED")
+    print("VOID-COPY INITIALIZED - TARGET ACQUIRED")
     print("PlaceId:", game.PlaceId, "| Game:", game.Name)
 
     local visited = {}
-    local id_map = {}
-    local root = serialize_instance(game, visited, id_map)
+    local node_count = { value = 0 }
+    local root = serialize_instance(game, visited, node_count, 0)
 
-    local json_data = game:GetService("HttpService"):JSONEncode({
+    local payload = {
         metadata = {
             place_id = game.PlaceId,
             game_name = game.Name,
             timestamp = os.time(),
-            instance_count = #visited
+            instance_count = node_count.value,
         },
         hierarchy = root,
-        id_map = id_map
-    })
+    }
 
-    local folder_path = CONFIG.output_folder .. "/" .. game.PlaceId .. "_" .. game.Name:gsub("%W", "_")
-    makefolder(folder_path)
+    local json_data = HttpService:JSONEncode(payload)
+
+    local folder_path = string.format("%s/%s_%s", CONFIG.output_folder, tostring(game.PlaceId), sanitize_name(game.Name))
+    ensure_folder(CONFIG.output_folder)
+    ensure_folder(folder_path)
+
+    if not writefile then
+        error("writefile is not available in this executor environment")
+    end
 
     writefile(folder_path .. "/hierarchy.json", json_data)
-    print("COPY COMPLETE – Hierarchy written to:", folder_path .. "/hierarchy.json")
+    print("COPY COMPLETE - Hierarchy written to:", folder_path .. "/hierarchy.json")
 
-    local reconstructor_code = [[
--- VOID-COPY RECONSTRUCTOR v1.0 | Load via loadstring
-local data = game:GetService("HttpService"):JSONDecode(game:HttpGet("https://raw.githubusercontent.com/BennyTermux/VOID-COPY/main/hierarchy.json"))
-local function rebuild(node, parent)
-    local inst = Instance.new(node.class)
-    inst.Name = node.name
-    for k, v in pairs(node.properties) do pcall(function() inst[k] = v end) end
-    for k, v in pairs(node.attributes) do inst:SetAttribute(k, v) end
-    for _, tag in ipairs(node.tags) do inst:AddTag(tag) end
-    if node.source then inst.Source = node.source end
-    inst.Parent = parent
-    for _, child in ipairs(node.children) do rebuild(child, inst) end
-end
-rebuild(data.hierarchy, game)
-print("VOID-COPY RECONSTRUCTION COMPLETE")
-]]
+    local hierarchy_url = "https://raw.githubusercontent.com/YOURUSERNAME/VOID-COPY/main/hierarchy.json"
+    local reconstructor_code = build_reconstructor_template(hierarchy_url)
     writefile(folder_path .. "/reconstructor.lua", reconstructor_code)
-    print("RECONSTRUCTOR GENERATED – Ready for GitHub")
+    print("RECONSTRUCTOR GENERATED - Ready for GitHub")
 
-    local loadstring_template = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/BennyTermux/VOID-COPY/main/reconstructor.lua"))()'
+    local loadstring_template = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/YOURUSERNAME/VOID-COPY/main/reconstructor.lua"))()'
     print("GITHUB LOADSTRING READY:")
     print(loadstring_template)
     print("Replace YOURUSERNAME with your GitHub username and upload the folder contents.")
 end
 
-pcall(main)
-print("VOID-COPY MISSION COMPLETE – Files written to executor workspace.")
+local ok, err = pcall(main)
+if not ok then
+    warn("VOID-COPY FAILED:", err)
+else
+    print("VOID-COPY MISSION COMPLETE - Files written to executor workspace.")
+end
+
+return VOID
